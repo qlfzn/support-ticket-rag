@@ -7,9 +7,11 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 from chromadb.utils import embedding_functions
+from openai import OpenAI
+from groq import Groq
 
 dotenv.load_dotenv()
-CHROMA_PATH = "chroma"
+CHROMA_PATH = "./chroma"
 
 
 def load_document(path: str) -> list[str]:
@@ -22,7 +24,7 @@ def load_document(path: str) -> list[str]:
     return document
 
 
-def load_tickets_data(path: str):
+def load_tickets_data(path: str) -> list[Document]:
     tickets_df = pd.read_csv(path)
 
     # create column for embedding
@@ -54,7 +56,7 @@ def load_tickets_data(path: str):
     return ticket_chunks
 
 
-def chunk_document_text(document: list[str], chunk_size: int):
+def chunk_document_text(document: list[str], chunk_size: int) -> list[Document]:
     # chunking text to create smaller text size
     docs = [
         Document(metadata={"source": "policy_doc"}, page_content=text)
@@ -73,6 +75,9 @@ def chunk_document_text(document: list[str], chunk_size: int):
 
 
 def create_embeddings(text_chunks: list[Document], ticket_chunks: list[Document]):
+    if os.path.isdir(CHROMA_PATH):
+        print("\nChroma path already exists. Skipping...")
+    
     client = chromadb.PersistentClient("./chroma")
 
     embed_func = embedding_functions.SentenceTransformerEmbeddingFunction(
@@ -98,22 +103,71 @@ def create_embeddings(text_chunks: list[Document], ticket_chunks: list[Document]
 
     return collection
 
+def query_db(query: str, source: str) -> chromadb.QueryResult:
+    coll = chromadb.PersistentClient("./chroma").get_collection("tech-policy-tickets")
 
-doc = load_document("./data/techflow_rule_docs.pdf")
-ticket_chunks = load_tickets_data("./data/customer_support_tickets_200k.csv")
-print("\nChunking text from PDF...")
-pdf_chunks = chunk_document_text(doc, 1000)
+    results = coll.query(
+        query_texts=[query],
+        n_results=2,
+        where={"source": source}
+    )
 
-print("\n", pdf_chunks[0:3])
-print("\n", ticket_chunks[3])
+    return results
 
-doc_collection = create_embeddings(pdf_chunks, ticket_chunks)
-coll = chromadb.PersistentClient("./chroma").get_collection("tech-policy-tickets")
+def generate_response(policy, tickets, new_ticket):
+    client = Groq(
+        api_key=os.getenv("GROQ_API_KEY")
+    )
 
-# if coll:
-#     results = coll.query(
-#         query_texts=["What is the refund window?"],
-#         n_results=1,
-#         where={"source": "policy_doc"}
-#     )
-#     print(results["documents"])
+    prompt = f"""
+        Based on these guidelines:
+        {policy}
+
+        Here's a new support ticket:
+        {new_ticket}
+
+        Suggest a response that:
+        1. Follows the policy
+        2. Is professional and empathetic
+        3. Cites the relevant policy or past precedent
+        4. Provides clear next steps
+    """
+
+    text = client.chat.completions.create(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a support agent assistant."
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        model="llama-3.3-70b-versatile"
+    )
+
+    return text.choices[0].message.content
+
+# doc = load_document("./data/techflow_rule_docs.pdf")
+# ticket_chunks = load_tickets_data("./data/customer_support_tickets_200k.csv")
+# print("\nChunking text from PDF...")
+# pdf_chunks = chunk_document_text(doc, 1000)
+
+# if os.path.isdir(CHROMA_PATH):
+#     print("\nChroma path already exists. Skipping...")
+# else:
+#     doc_collection = create_embeddings(pdf_chunks, ticket_chunks)
+
+policy_retrieved = query_db(
+    query="I would like to request a refund for the recent charge.",
+    source="policy_doc"
+)
+
+tickets_retrieved = query_db(
+    query="I would like to request a refund for the recent charge.",
+    source="tickets"
+)
+
+text = generate_response(policy_retrieved, tickets_retrieved, "The payment was deducted from my bank account but the transaction shows failed.")
+print("\n",text)
